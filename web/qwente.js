@@ -18,10 +18,14 @@ const CSS = `
 .qwente-msgs { flex:1 1 auto; min-height:120px; overflow-y:auto; display:flex; flex-direction:column;
   gap:6px; padding:4px; background:#17171c; border-radius:6px; }
 .qwente-msg { max-width:85%; padding:7px 10px; border-radius:10px; white-space:pre-wrap;
-  word-break:break-word; line-height:1.5; }
+  word-break:break-word; line-height:1.5; position:relative; }
 .qwente-msg.user { align-self:flex-end; background:#2b5278; border-bottom-right-radius:2px; }
 .qwente-msg.asst { align-self:flex-start; background:#2a2a33; border-bottom-left-radius:2px; }
 .qwente-msg.sys { align-self:center; background:transparent; color:#889; font-size:12px; padding:2px; }
+.qwente-copy { position:absolute; top:3px; right:4px; opacity:0; border:none; background:rgba(0,0,0,.35);
+  color:#dde; border-radius:4px; font-size:11px; cursor:pointer; padding:1px 5px; transition:opacity .15s; }
+.qwente-msg:hover .qwente-copy { opacity:1; }
+.qwente-msg.user .qwente-copy { right:auto; left:4px; }
 .qwente-attach { display:inline-block; font-size:11px; background:#3a3a46; border-radius:4px;
   padding:1px 6px; margin:2px 4px 0 0; color:#bcd; }
 .qwente-think { margin-top:4px; font-size:12px; color:#99a; }
@@ -48,6 +52,21 @@ const CSS = `
 
 function escapeHtml(s) {
     return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+// 兼容旧历史：assistant 消息若是 JSON 信封，提取 reply 纯文本
+function displayText(m) {
+    const c = String(m.content ?? "");
+    if (m.role !== "assistant" || !c.trimStart().startsWith("{")) return c;
+    try {
+        const d = JSON.parse(c);
+        if (d && typeof d.reply === "string") return d.reply;
+    } catch { /* 继续尝试截断 JSON */ }
+    const mm = c.match(/"reply"\s*:\s*"((?:[^"\\]|\\.)*)/);
+    if (mm) {
+        try { return JSON.parse(`"${mm[1]}"`); } catch { return mm[1]; }
+    }
+    return c;
 }
 
 function renderContent(text) {
@@ -168,11 +187,32 @@ function renderAll(node) {
     for (const m of node._qwente.history) {
         const div = document.createElement("div");
         div.className = "qwente-msg " + (m.role === "user" ? "user" : "asst");
-        let html = renderContent(m.content ?? "");
+        const text = displayText(m);
+        let html = renderContent(text);
         if (Array.isArray(m.attachments) && m.attachments.length) {
             html = m.attachments.map((a) => `<span class="qwente-attach">📎 ${escapeHtml(a)}</span>`).join("") + html;
         }
-        div.innerHTML = html || "<i>(空)</i>";
+        const body = document.createElement("div");
+        body.className = "qwente-msgbody";
+        body.innerHTML = html || "<i>(空)</i>";
+        div.appendChild(body);
+        // 气泡复制按钮
+        const copyBtn = document.createElement("button");
+        copyBtn.className = "qwente-copy";
+        copyBtn.textContent = "📋";
+        copyBtn.title = "复制内容";
+        copyBtn.onclick = async (e) => {
+            e.stopPropagation();
+            try {
+                await navigator.clipboard.writeText(text);
+                copyBtn.textContent = "✓";
+                setTimeout(() => { copyBtn.textContent = "📋"; }, 1200);
+            } catch {
+                copyBtn.textContent = "✗";
+                setTimeout(() => { copyBtn.textContent = "📋"; }, 1200);
+            }
+        };
+        div.appendChild(copyBtn);
         box.appendChild(div);
     }
     if (node._qwente.pending) {

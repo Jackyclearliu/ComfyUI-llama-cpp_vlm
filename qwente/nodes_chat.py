@@ -321,9 +321,11 @@ class QwenTE_MultiTurnChat:
         raw_text = (output["choices"][0]["message"]["content"] or "").removeprefix(": ").strip()
 
         envelope = _extract_envelope(raw_text)
-        reply = envelope["reply"]
-        if not 增强设置["show_think"]:
-            reply = THINK_RE.sub("", reply).strip()
+        base_reply = THINK_RE.sub("", envelope["reply"]).strip()
+        think_match = THINK_RE.search(raw_text)
+        think_block = (think_match.group(0) + "\n") if think_match else ""
+        # 展示回复：按设置决定是否带 think 块（前端折叠显示）
+        reply = (think_block + base_reply) if 增强设置["show_think"] else base_reply
 
         if envelope["state"]:
             state.update(envelope["state"])
@@ -339,9 +341,10 @@ class QwenTE_MultiTurnChat:
         if attachment_names:
             user_entry["attachments"] = attachment_names
         history.append(user_entry)
-        history_for_store = raw_text if cfg.get("keep_think_in_history") else THINK_RE.sub("", raw_text).strip()
-        history.append({"role": "assistant", "content": history_for_store, "created_at": now,
-                        "token_count": _token_count(llm, history_for_store)})
+        # 历史中存解析后的干净回复（而非原始 JSON 信封），think 按加载器配置保留
+        history_content = (think_block + base_reply) if cfg.get("keep_think_in_history") else base_reply
+        history.append({"role": "assistant", "content": history_content, "created_at": now,
+                        "token_count": _token_count(llm, history_content)})
 
         current_rounds = sum(1 for m in history if m["role"] == "user")
         context_state = {
