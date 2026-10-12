@@ -171,6 +171,7 @@ class QwenTE_MultiTurnChat:
         "- 斜杠命令：/new 开启新会话（清空历史并重置请求ID）、/clear 清空面板显示、/unload 推理完成后卸载模型、/help 查看帮助。\n"
         "- 模型回复以 reply/state/options JSON 信封约定解析：options 会渲染为可点击的快捷选项，state 在轮次间自动透传。\n"
         "- 连接 QwenTE_SkillLoader 可注入技能（skills/ 目录下的 SKILL.md）。\n"
+        "- 空消息且无附件时自动跳过推理，整体运行工作流不会产生空白对话。\n"
         "- 输出的对话历史JSON会自动回存到节点内部，也可外接显示节点存档。"
     )
 
@@ -209,6 +210,22 @@ class QwenTE_MultiTurnChat:
 
     def process(self, qwen模型, 增强设置, 用户消息, 对话历史JSON, 请求ID, 当前媒体JSON,
                 流程状态JSON, 选项JSON, skill加载器=None):
+        # 空消息且未附媒体：跳过推理（整体运行工作流时不应产生空白对话轮次）
+        media_paths = _parse_json_safe(当前媒体JSON, [])
+        if not 用户消息.strip() and not (isinstance(media_paths, list) and media_paths):
+            history = _parse_json_safe(对话历史JSON, [])
+            if not isinstance(history, list):
+                history = []
+            state = _parse_json_safe(流程状态JSON, {})
+            options = _parse_json_safe(选项JSON, [])
+            payload = {"reply": "", "history": history,
+                       "state": state if isinstance(state, dict) else {},
+                       "options": options if isinstance(options, list) else [],
+                       "request_id": 请求ID.strip(), "context_state": None, "attachments": [],
+                       "note": "未输入消息，已跳过推理（在面板输入内容后发送）"}
+            return {"ui": {"qwente_chat": [payload]},
+                    "result": (json.dumps(history, ensure_ascii=False),)}
+
         QWEN_TE_STORAGE.ensure_loaded(qwen模型)
         llm = QWEN_TE_STORAGE.llm
         cfg = QWEN_TE_STORAGE.current_config

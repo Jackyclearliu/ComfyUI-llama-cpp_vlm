@@ -144,8 +144,9 @@ function applyPayload(node, payload) {
     setW(node, "当前媒体JSON", "[]");
     st.attachments = [];
     renderAll(node);
-    renderBadge(node, payload.context_state);
+    if (payload.context_state) renderBadge(node, payload.context_state);
     renderOptions(node, payload.options ?? []);
+    if (payload.note) sysMsg(node, payload.note);
     scrollBottom(node);
 }
 
