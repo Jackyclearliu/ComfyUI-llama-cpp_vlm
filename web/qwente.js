@@ -113,10 +113,14 @@ function getWVal(node, name) {
 function applyPayload(node, payload) {
     const st = node._qwente;
     st.pending = false;
+    st.history = Array.isArray(payload.history) ? payload.history : [];
     setW(node, "对话历史JSON", JSON.stringify(payload.history ?? []));
     setW(node, "流程状态JSON", JSON.stringify(payload.state ?? {}));
     setW(node, "选项JSON", JSON.stringify(payload.options ?? []));
-    if (payload.request_id) setW(node, "请求ID", payload.request_id);
+    if (payload.request_id) {
+        setW(node, "请求ID", payload.request_id);
+        if (st.reqInput && st.reqInput.value !== payload.request_id) st.reqInput.value = payload.request_id;
+    }
     setW(node, "用户消息", "");
     setW(node, "当前媒体JSON", "[]");
     st.attachments = [];
@@ -255,9 +259,15 @@ async function sendMessage(node) {
     setW(node, "用户消息", text);
     setW(node, "当前媒体JSON", JSON.stringify(st.attachments.map((a) => a.path)));
     st.input.value = "";
+    // 乐观回显用户消息，后端返回后以完整历史覆盖
+    st.history = [...st.history, {
+        role: "user", content: text,
+        attachments: st.attachments.map((a) => a.name),
+    }];
     st.pending = true;
     renderAll(node);
     renderOptions(node, []);
+    scrollBottom(node);
     app.queuePrompt(0, 1);
 }
 
