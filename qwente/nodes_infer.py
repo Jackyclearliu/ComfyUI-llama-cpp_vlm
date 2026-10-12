@@ -17,10 +17,13 @@ class QwenTE_ImageInfer:
     def INPUT_TYPES(s):
         return {
             "required": {
-                "qwen模型": ("QWENLLAMA",),
-                "输入模式": (["文本", "图片"], {"default": "文本"}),
-                "提示词": ("STRING", {"default": "", "multiline": True}),
-                "系统提示词": ("STRING", {"default": "", "multiline": True}),
+                "qwen模型": ("QWENLLAMA", {"tooltip": "来自 QwenTE_ModelLoader"}),
+                "输入模式": (["文本", "图片"], {"default": "文本",
+                                              "tooltip": "文本：纯文本推理（扩写/翻译等）；图片：图文多模态推理（反推/看图回答）"}),
+                "提示词": ("STRING", {"default": "", "multiline": True,
+                                      "tooltip": "用户消息；图片模式下与图片一起发送"}),
+                "系统提示词": ("STRING", {"default": "", "multiline": True,
+                                          "tooltip": "system 角色内容，用于约束模型行为"}),
                 "最多帧数": ("INT", {"default": 24, "min": 1, "max": 1024, "step": 1,
                                      "tooltip": "多图/视频帧超过该数量时均匀抽帧"}),
                 "最大边长": ("INT", {"default": 1024, "min": 128, "max": 16384, "step": 64,
@@ -34,7 +37,8 @@ class QwenTE_ImageInfer:
                 "存在惩罚": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 2.0, "step": 0.01}),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff,
                                  "control_after_generate": True}),
-                "输出think块": ("BOOLEAN", {"default": False}),
+                "输出think块": ("BOOLEAN", {"default": False,
+                                            "tooltip": "开启后输出保留 <think> 思考过程"}),
                 "生成后自动卸载模型": ("BOOLEAN", {"default": False,
                                                  "tooltip": "与其他工作流串联使用时开启，防止显存占用"}),
             },
@@ -45,6 +49,12 @@ class QwenTE_ImageInfer:
     RETURN_NAMES = ("文本",)
     FUNCTION = "process"
     CATEGORY = "QwenTE"
+    DESCRIPTION = (
+        "单次推理节点：文本扩写/翻译（文本模式）与图像反推/看图问答（图片模式）。\n"
+        "- 图片模式支持最多 8 路图片输入（每路可以是多帧 batch），超过「最多帧数」时均匀抽帧。\n"
+        "- 输出为纯文本，可接 showAnything/文本类下游节点。\n"
+        "- 与其他生图工作流串联时建议开启「生成后自动卸载模型」。"
+    )
 
     def process(self, qwen模型, 输入模式, 提示词, 系统提示词, 最多帧数, 最大边长, 最大生成token,
                 温度, top_p, top_k, 重复惩罚, 频率惩罚, 存在惩罚, seed, 输出think块,

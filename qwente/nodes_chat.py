@@ -14,6 +14,8 @@ from .common import QWEN_TE_STORAGE
 
 THINK_RE = re.compile(r"<think>.*?(?:</think>|$)", re.DOTALL)
 
+VIDEO_EXTS = {".mp4", ".webm", ".mov", ".mkv", ".avi", ".m4v"}
+
 OUTPUT_FORMAT_INSTRUCTION = (
     "\n\n【输出格式要求】你的每次回复必须是一个 JSON 对象（不要用 markdown 代码块包裹），格式：\n"
     '{"reply": "给用户看的回复正文", "state": {流程状态对象，原样保留并更新其中的字段}, "options": ["2-4个供用户快捷选择的下一步选项"]}\n'
@@ -35,7 +37,10 @@ def _parse_json_safe(text, default):
 
 
 def _extract_envelope(text):
-    """从模型输出中解析 reply/state/options 信封，失败时整体作为 reply。"""
+    """从模型输出中解析 reply/state/options 信封。
+
+    依次尝试：完整 JSON → 截断 JSON 的 reply 字段正则提取 → 整体作为纯文本回复。
+    """
     candidate = text.strip()
     m = re.search(r"```(?:json)?\s*(\{.*\})\s*```", candidate, re.DOTALL)
     if m:
@@ -47,15 +52,34 @@ def _extract_envelope(text):
             candidate = candidate[start:end + 1]
     try:
         data = json.loads(candidate)
+        if isinstance(data, dict) and "reply" in data:
+            return {
+                "reply": str(data.get("reply", "")).strip(),
+                "state": data.get("state") if isinstance(data.get("state"), dict) else None,
+                "options": data.get("options") if isinstance(data.get("options"), list) else None,
+            }
     except Exception:
-        return {"reply": text.strip(), "state": None, "options": None}
-    if not isinstance(data, dict) or "reply" not in data:
-        return {"reply": text.strip(), "state": None, "options": None}
-    return {
-        "reply": str(data.get("reply", "")).strip(),
-        "state": data.get("state") if isinstance(data.get("state"), dict) else None,
-        "options": data.get("options") if isinstance(data.get("options"), list) else None,
-    }
+        pass
+
+    # JSON 被 max_tokens 截断：尽力提取 reply 字段
+    m = re.search(r'"reply"\s*:\s*"((?:[^"\\]|\\.)*)', text)
+    if m:
+        fragment = m.group(1)
+        reply = None
+        while fragment:
+            try:
+                reply = json.loads(f'"{fragment}"')
+                break
+            except Exception:
+                fragment = fragment[:-1]
+        if reply:
+            om = re.search(r'"options"\s*:\s*\[(.*?)\]', text, re.DOTALL)
+            options = None
+            if om:
+                options = re.findall(r'"((?:[^"\\]|\\.)*)"', om.group(1))
+            return {"reply": reply.strip(), "state": None, "options": options}
+
+    return {"reply": text.strip(), "state": None, "options": None}
 
 
 def _token_count(llm, text):
@@ -69,10 +93,12 @@ class QwenTE_ChatSettings:
     @classmethod
     def INPUT_TYPES(s):
         return {"required": {
-            "系统提示词": ("STRING", {"default": "", "multiline": True}),
+            "系统提示词": ("STRING", {"default": "", "multiline": True,
+                                      "tooltip": "附加的系统提示词，会拼接在 skill 内容之前"}),
             "最大历史轮数": ("INT", {"default": 100, "min": 1, "max": 1000, "step": 1,
                                      "tooltip": "超出后最早的用户/助手轮次会被裁剪"}),
-            "最大生成token": ("INT", {"default": 4096, "min": 0, "max": 65536, "step": 1}),
+            "最大生成token": ("INT", {"default": 4096, "min": 0, "max": 65536, "step": 1,
+                                      "tooltip": "同时作为上下文预算的输出预留量"}),
             "温度": ("FLOAT", {"default": 0.7, "min": 0.0, "max": 2.0, "step": 0.01}),
             "top_p": ("FLOAT", {"default": 0.9, "min": 0.0, "max": 1.0, "step": 0.01}),
             "top_k": ("INT", {"default": 20, "min": 0, "max": 1000, "step": 1}),
@@ -81,15 +107,18 @@ class QwenTE_ChatSettings:
             "存在惩罚": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 2.0, "step": 0.01}),
             "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff,
                              "control_after_generate": True}),
-            "输出think块": ("BOOLEAN", {"default": False}),
+            "输出think块": ("BOOLEAN", {"default": False,
+                                        "tooltip": "开启后回复中保留 <think> 思考过程（前端折叠显示）"}),
             "最大边长": ("INT", {"default": 1024, "min": 128, "max": 16384, "step": 64,
-                                 "tooltip": "当前图片JSON 中图片的缩放边长"}),
+                                 "tooltip": "上传图片等比缩放到该边长以内，控制视觉 token 占用"}),
         }}
 
     RETURN_TYPES = ("QWEN_TE_CHAT_SETTINGS",)
     RETURN_NAMES = ("增强设置",)
     FUNCTION = "pack"
     CATEGORY = "QwenTE"
+    DESCRIPTION = ("多轮对话参数包：系统提示词、历史轮数、采样参数与图片预处理设置。\n"
+                   "输出连接 QwenTE_MultiTurnChat 的「增强设置」输入。")
 
     def pack(self, 系统提示词, 最大历史轮数, 最大生成token, 温度, top_p, top_k,
              重复惩罚, 频率惩罚, 存在惩罚, seed, 输出think块, 最大边长):
@@ -116,52 +145,69 @@ class QwenTE_MultiTurnChat:
             "required": {
                 "qwen模型": ("QWENLLAMA",),
                 "增强设置": ("QWEN_TE_CHAT_SETTINGS",),
+                # 以下控件由节点前端聊天面板自动管理，请勿手工编辑
                 "用户消息": ("STRING", {"default": "", "multiline": True}),
-                "对话历史JSON": ("STRING", {"default": "", "multiline": True,
-                                            "tooltip": "将上一轮的对话历史JSON输出连回/粘贴回此处"}),
+                "对话历史JSON": ("STRING", {"default": "", "multiline": True}),
                 "请求ID": ("STRING", {"default": "",
                                       "tooltip": "会话标识，留空自动生成；同一 ID 视为同一会话"}),
-                "当前图片JSON": ("STRING", {"default": "[]", "multiline": True,
-                                            "tooltip": 'JSON 数组，元素为图片路径（相对 ComfyUI input 目录或绝对路径），如 ["test.png"]'}),
-                "流程状态JSON": ("STRING", {"default": "", "multiline": True,
-                                            "tooltip": "将上一轮的流程状态JSON输出连回/粘贴回此处"}),
-                "选项JSON": ("STRING", {"default": "[]", "multiline": True,
-                                        "tooltip": "上一轮的选项回显；选择选项请直接把选项文本填入用户消息"}),
+                "当前媒体JSON": ("STRING", {"default": "[]", "multiline": True,
+                                            "tooltip": 'JSON 数组，本轮要发送的图片/视频路径（相对 input 目录或绝对路径）'}),
+                "流程状态JSON": ("STRING", {"default": "", "multiline": True}),
+                "选项JSON": ("STRING", {"default": "[]", "multiline": True}),
             },
             "optional": {
                 "skill加载器": ("QWEN_TE_SKILL",),
             },
         }
 
-    RETURN_TYPES = ("STRING", "STRING", "STRING", "STRING", "STRING", "STRING")
-    RETURN_NAMES = ("回复", "对话历史JSON", "流程状态JSON", "选项JSON", "请求ID", "上下文状态JSON")
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("对话历史JSON",)
     FUNCTION = "process"
     CATEGORY = "QwenTE"
+    OUTPUT_NODE = True
+    DESCRIPTION = (
+        "多轮对话节点（前端聊天面板）。\n"
+        "- 在节点面板的输入框中直接对话：Enter 发送，Shift+Enter 换行；右侧按钮可上传图片（≤8MB）和视频（≤300MB）。\n"
+        "- 斜杠命令：/new 开启新会话（清空历史并重置请求ID）、/clear 清空面板显示、/unload 推理完成后卸载模型、/help 查看帮助。\n"
+        "- 模型回复以 reply/state/options JSON 信封约定解析：options 会渲染为可点击的快捷选项，state 在轮次间自动透传。\n"
+        "- 连接 QwenTE_SkillLoader 可注入技能（skills/ 目录下的 SKILL.md）。\n"
+        "- 输出的对话历史JSON会自动回存到节点内部，也可外接显示节点存档。"
+    )
 
-    def _load_images(self, 当前图片JSON, max_size):
-        paths = _parse_json_safe(当前图片JSON, [])
+    def _load_media(self, 当前媒体JSON, max_size):
+        """返回 (content_items, token_estimate, attachment_names)。"""
+        paths = _parse_json_safe(当前媒体JSON, [])
         if not isinstance(paths, list):
-            return [], 0
-        frames = []
+            return [], 0, []
+        items = []
         token_est = 0
+        names = []
         for p in paths:
             if not isinstance(p, str) or not p.strip():
                 continue
             p = p.strip()
             full = p if os.path.isabs(p) else os.path.join(folder_paths.get_input_directory(), p)
-            if not full or not os.path.isfile(full):
-                print(f"[QwenTE] 当前图片JSON 中的文件不存在，已跳过: {p}")
+            if not os.path.isfile(full):
+                print(f"[QwenTE] 当前媒体JSON 中的文件不存在，已跳过: {p}")
                 continue
-            img = Image.open(full).convert("RGB")
-            w, h = img.size
-            scale = min(max_size / max(w, h), 1.0)
-            if scale < 1.0:
-                img = img.resize((max(1, int(w * scale)), max(1, int(h * scale))), Image.LANCZOS)
-            token_est += int((img.size[0] / 28) * (img.size[1] / 28))
-            frames.append(image2base64(np.array(img)))
-        return frames, token_est
+            ext = os.path.splitext(full)[1].lower()
+            names.append(os.path.basename(full))
+            if ext in VIDEO_EXTS:
+                # mtmd 原生视频解码（需要 ffmpeg 在 PATH 中）
+                items.append({"type": "video_url", "video_url": {"url": os.path.abspath(full)}})
+                token_est += int((max_size / 28) ** 2) * 8  # 按 8 帧估算
+            else:
+                img = Image.open(full).convert("RGB")
+                w, h = img.size
+                scale = min(max_size / max(w, h), 1.0)
+                if scale < 1.0:
+                    img = img.resize((max(1, int(w * scale)), max(1, int(h * scale))), Image.LANCZOS)
+                token_est += int((img.size[0] / 28) * (img.size[1] / 28))
+                items.append({"type": "image_url",
+                              "image_url": {"url": f"data:image/jpeg;base64,{image2base64(np.array(img))}"}})
+        return items, token_est, names
 
-    def process(self, qwen模型, 增强设置, 用户消息, 对话历史JSON, 请求ID, 当前图片JSON,
+    def process(self, qwen模型, 增强设置, 用户消息, 对话历史JSON, 请求ID, 当前媒体JSON,
                 流程状态JSON, 选项JSON, skill加载器=None):
         QWEN_TE_STORAGE.ensure_loaded(qwen模型)
         llm = QWEN_TE_STORAGE.llm
@@ -184,7 +230,24 @@ class QwenTE_MultiTurnChat:
         state.setdefault("loaded_references", [])
         state.setdefault("final_result", "")
 
-        frames, image_token_est = self._load_images(当前图片JSON, 增强设置["max_size"])
+        # 服务端斜杠命令：/unload 卸载模型后直接返回，不做推理
+        if 用户消息.strip() == "/unload":
+            QWEN_TE_STORAGE.clean()
+            reply = "✅ 模型已卸载，显存已释放。"
+            now = int(time.time() * 1000)
+            history.append({"role": "user", "content": "/unload", "created_at": now, "token_count": 0})
+            history.append({"role": "assistant", "content": reply, "created_at": now, "token_count": 0})
+            context_state = {"used_tokens": 0, "prompt_budget": 0, "context_limit": cfg["n_ctx"],
+                             "output_reserve": 0, "remaining_tokens": 0, "percent": 0,
+                             "trimmed_messages": 0, "current_rounds": 0, "max_rounds": 0, "estimated": False}
+            payload = {"reply": reply, "history": history, "state": state, "options": [],
+                       "request_id": request_id, "context_state": context_state, "attachments": []}
+            return {"ui": {"qwente_chat": [payload]},
+                    "result": (json.dumps(history, ensure_ascii=False),)}
+
+        media_items, media_token_est, attachment_names = self._load_media(当前媒体JSON, 增强设置["max_size"])
+        if media_items and QWEN_TE_STORAGE.chat_handler is None:
+            raise ValueError("当前模型未加载 mmproj 视觉模块，无法处理图片/视频输入")
 
         system_parts = []
         if 增强设置["system_prompt"].strip():
@@ -202,10 +265,9 @@ class QwenTE_MultiTurnChat:
                 content = THINK_RE.sub("", content).strip()
             messages.append({"role": m["role"], "content": content})
 
-        if frames:
+        if media_items:
             user_content = [{"type": "text", "text": 用户消息}] if 用户消息.strip() else []
-            for data in frames:
-                user_content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{data}"}})
+            user_content.extend(media_items)
             messages.append({"role": "user", "content": user_content})
         else:
             messages.append({"role": "user", "content": 用户消息})
@@ -216,13 +278,14 @@ class QwenTE_MultiTurnChat:
         prompt_budget = context_limit - output_reserve
 
         def tokens_of(msgs):
-            total = image_token_est
+            total = media_token_est
             for m in msgs:
                 c = m["content"]
                 if isinstance(c, str):
                     total += _token_count(llm, c) + 4
                 else:
-                    total += sum(_token_count(llm, i.get("text", "")) for i in c if isinstance(i, dict) and i.get("type") == "text") + 4
+                    total += sum(_token_count(llm, i.get("text", "")) for i in c
+                                 if isinstance(i, dict) and i.get("type") == "text") + 4
             return total
 
         used_tokens = tokens_of(messages)
@@ -271,8 +334,11 @@ class QwenTE_MultiTurnChat:
         options = [str(o) for o in options][:8]
 
         now = int(time.time() * 1000)
-        history.append({"role": "user", "content": 用户消息, "created_at": now,
-                        "token_count": _token_count(llm, 用户消息)})
+        user_entry = {"role": "user", "content": 用户消息, "created_at": now,
+                      "token_count": _token_count(llm, 用户消息)}
+        if attachment_names:
+            user_entry["attachments"] = attachment_names
+        history.append(user_entry)
         history_for_store = raw_text if cfg.get("keep_think_in_history") else THINK_RE.sub("", raw_text).strip()
         history.append({"role": "assistant", "content": history_for_store, "created_at": now,
                         "token_count": _token_count(llm, history_for_store)})
@@ -293,20 +359,12 @@ class QwenTE_MultiTurnChat:
 
         QWEN_TE_STORAGE.reset_context()
 
-        display = reply + f"\n\n[上下文 {context_state['percent']}% | 轮次 {current_rounds}/{max_rounds} | 裁剪 {trimmed}]"
-        if options:
-            display += "\n选项: " + " / ".join(options)
-
+        payload = {"reply": reply, "history": history, "state": state, "options": options,
+                   "request_id": request_id, "context_state": context_state,
+                   "attachments": attachment_names}
         return {
-            "ui": {"text": [display]},
-            "result": (
-                reply,
-                json.dumps(history, ensure_ascii=False),
-                json.dumps(state, ensure_ascii=False),
-                json.dumps(options, ensure_ascii=False),
-                request_id,
-                json.dumps(context_state, ensure_ascii=False),
-            ),
+            "ui": {"qwente_chat": [payload]},
+            "result": (json.dumps(history, ensure_ascii=False),),
         }
 
 

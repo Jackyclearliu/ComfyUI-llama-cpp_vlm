@@ -55,6 +55,12 @@ class QwenTE_SkillLoader:
     RETURN_NAMES = ("skill加载器",)
     FUNCTION = "load"
     CATEGORY = "QwenTE"
+    DESCRIPTION = (
+        "从节点包 skills/ 目录加载技能（每个技能一个子目录，内含 SKILL.md：\n"
+        "--- frontmatter（name/description）--- + 正文提示词指令）。\n"
+        "输出连接 QwenTE_MultiTurnChat 的「skill加载器」输入；\n"
+        "skills 目录内容变化后重启或刷新即可出现在下拉列表。"
+    )
 
     @classmethod
     def VALIDATE_INPUTS(cls, skill, **kwargs):
